@@ -36,7 +36,8 @@ async function checkSingleService(service, env) {
     const response = await fetch(service.url, {
       method: "GET",
       headers: { "User-Agent": "Cloudflare-Heartbeat-Worker/1.0" },
-      signal: AbortSignal.timeout(4000)
+      // Change 4000 to 8000 for a more forgiving timeout limit
+      signal: AbortSignal.timeout(8000)
     });
     responseTime = Date.now() - startTime;
     statusCode = response.status;
