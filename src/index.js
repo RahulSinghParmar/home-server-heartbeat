@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: Home Server Heartbeat Monitor
+ * Cloudflare Worker: Home Server Heartbeat Monitor (Parallel Execution Fix)
  */
 
 const SERVICES_TO_MONITOR = [
@@ -9,16 +9,14 @@ const SERVICES_TO_MONITOR = [
   { name: "Glance Dashboard", url: "https://dash.parmar.homes" }
 ];
 
-const NOTIFY_EMAIL = "rahulsinghparmar4@gmail.com";     // Your destination email
-const FROM_EMAIL = "alerts@parmar.homes";               // Verified Resend sender domain
+const NOTIFY_EMAIL = "rahulsinghparmar4@gmail.com";
+const FROM_EMAIL = "alerts@parmar.homes";
 
 export default {
-  // Cron Trigger Execution (runs every 5 minutes)
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runHealthCheck(env));
   },
 
-  // Manual Browser Trigger (for instant testing)
   async fetch(request, env, ctx) {
     const results = await runHealthCheck(env);
     return new Response(JSON.stringify(results, null, 2), {
@@ -27,67 +25,68 @@ export default {
   }
 };
 
-async function runHealthCheck(env) {
-  const checkResults = [];
+async function checkSingleService(service, env) {
+  let isUp = false;
+  let statusCode = 0;
+  let responseTime = 0;
 
-  for (const service of SERVICES_TO_MONITOR) {
-    let isUp = false;
-    let statusCode = 0;
-    let responseTime = 0;
-
-    const startTime = Date.now();
-    try {
-      const response = await fetch(service.url, {
-        method: "GET",
-        headers: { "User-Agent": "Cloudflare-Heartbeat-Worker/1.0" },
-        signal: AbortSignal.timeout(10000)
-      });
-      responseTime = Date.now() - startTime;
-      statusCode = response.status;
-      isUp = response.ok || (statusCode >= 300 && statusCode < 400);
-    } catch (err) {
-      responseTime = Date.now() - startTime;
-      isUp = false;
-      statusCode = 504;
-    }
-
-    const kvKey = `STATE_${service.name.replace(/\s+/g, "_")}`;
-    const previousState = (await env.HEARTBEAT_KV?.get(kvKey)) || "UP";
-    const currentStatus = isUp ? "UP" : "DOWN";
-
-    // Alert only on state transition (UP -> DOWN or DOWN -> UP)
-    if (previousState === "UP" && currentStatus === "DOWN") {
-      await sendEmailAlert(
-        env,
-        `🔴 ALERT: ${service.name} is DOWN!`,
-        buildAlertHTML(service.name, service.url, "DOWN", statusCode, responseTime)
-      );
-      if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "DOWN");
-    } else if (previousState === "DOWN" && currentStatus === "UP") {
-      await sendEmailAlert(
-        env,
-        `🟢 RECOVERED: ${service.name} is back ONLINE`,
-        buildAlertHTML(service.name, service.url, "RECOVERED", statusCode, responseTime)
-      );
-      if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "UP");
-    }
-
-    checkResults.push({
-      service: service.name,
-      status: currentStatus,
-      statusCode,
-      responseTime: `${responseTime}ms`
+  const startTime = Date.now();
+  try {
+    // Lower timeout to 4 seconds to prevent Worker socket choking
+    const response = await fetch(service.url, {
+      method: "GET",
+      headers: { "User-Agent": "Cloudflare-Heartbeat-Worker/1.0" },
+      signal: AbortSignal.timeout(4000)
     });
+    responseTime = Date.now() - startTime;
+    statusCode = response.status;
+    isUp = response.ok || (statusCode >= 300 && statusCode < 400);
+  } catch (err) {
+    responseTime = Date.now() - startTime;
+    isUp = false;
+    statusCode = 504;
   }
 
-  return checkResults;
+  const kvKey = `STATE_${service.name.replace(/\s+/g, "_")}`;
+  const previousState = (await env.HEARTBEAT_KV?.get(kvKey)) || "UP";
+  const currentStatus = isUp ? "UP" : "DOWN";
+
+  // Trigger alert ONLY on state change
+  if (previousState === "UP" && currentStatus === "DOWN") {
+    const sent = await sendEmailAlert(
+      env,
+      `🔴 ALERT: ${service.name} is DOWN!`,
+      buildAlertHTML(service.name, service.url, "DOWN", statusCode, responseTime)
+    );
+    // Only update KV if email was sent successfully or attempt completed
+    if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "DOWN");
+  } else if (previousState === "DOWN" && currentStatus === "UP") {
+    await sendEmailAlert(
+      env,
+      `🟢 RECOVERED: ${service.name} is back ONLINE`,
+      buildAlertHTML(service.name, service.url, "RECOVERED", statusCode, responseTime)
+    );
+    if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "UP");
+  }
+
+  return {
+    service: service.name,
+    status: currentStatus,
+    statusCode,
+    responseTime: `${responseTime}ms`
+  };
+}
+
+async function runHealthCheck(env) {
+  // Run all service checks concurrently using Promise.all
+  return await Promise.all(SERVICES_TO_MONITOR.map(s => checkSingleService(s, env)));
 }
 
 async function sendEmailAlert(env, subject, htmlBody) {
   const resendApiKey = env.RESEND_API_KEY;
   if (!resendApiKey) {
     console.error("RESEND_API_KEY environment variable is missing!");
-    return;
+    return false;
   }
 
   try {
@@ -105,9 +104,14 @@ async function sendEmailAlert(env, subject, htmlBody) {
       })
     });
 
-    if (!res.ok) console.error("Resend API error:", await res.text());
+    if (!res.ok) {
+      console.error("Resend API error:", await res.text());
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error("Failed to send email via Resend:", err);
+    return false;
   }
 }
 
