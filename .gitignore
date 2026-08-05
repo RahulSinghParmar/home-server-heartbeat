@@ -1,0 +1,17 @@
+# Cloudflare & Wrangler build output / cache
+.wrangler/
+.mf/
+dist/
+build/
+
+# Node modules & dependencies
+node_modules/
+
+# Local environment & secret files
+.env
+.env.*
+!.env.example
+
+# OS generated files
+.DS_Store
+Thumbs.db
