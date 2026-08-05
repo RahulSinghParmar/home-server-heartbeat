@@ -13,7 +13,7 @@
   // Add this to your wrangler.jsonc
   "kv_namespaces": [
     {
-      "binding": "KV",
+      "binding": "HEARTBEAT_KV",
       "id": "767e46fabeca47e99466224ced226f3a"
       
       // Optional: preview_id used when running `wrangler dev` for local dev
