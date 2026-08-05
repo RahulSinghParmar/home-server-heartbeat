@@ -1,136 +1,392 @@
 /**
- * Cloudflare Worker: Home Server Heartbeat Monitor (Parallel Execution Fix)
+ * ==========================================================
+ * Parmar Home Infrastructure Monitor
+ * Cloudflare Worker + KV + Resend
+ * Version 2.0
+ * ==========================================================
  */
 
-const SERVICES_TO_MONITOR = [
-  { name: "Photos (Immich)", url: "https://photos.parmar.homes" },
-  { name: "Drive (Nextcloud)", url: "https://drive.parmar.homes" },
-  { name: "Vaultwarden Passwords", url: "https://pass.parmar.homes" },
-  { name: "Glance Dashboard", url: "https://dash.parmar.homes" }
-];
+const CONFIG = {
+  notifyEmail: "rahulsinghparmar4@gmail.com",
+  fromEmail: "alerts@parmar.homes",
 
-const NOTIFY_EMAIL = "rahulsinghparmar4@gmail.com";
-const FROM_EMAIL = "alerts@parmar.homes";
+  failureThreshold: 3,
+  successThreshold: 2,
+
+  requestTimeoutMs: 10000
+};
+
+const SERVICES = [
+  {
+    name: "Photos (Immich)",
+    url: "https://photos.parmar.homes/api/server-info/ping"
+  },
+  {
+    name: "Drive (Nextcloud)",
+    url: "https://drive.parmar.homes/status.php"
+  },
+  {
+    name: "Vaultwarden Passwords",
+    url: "https://pass.parmar.homes/alive"
+  },
+  {
+    name: "Glance Dashboard",
+    url: "https://dash.parmar.homes"
+  }
+];
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runHealthCheck(env));
+    ctx.waitUntil(runHealthChecks(env));
   },
 
-  async fetch(request, env, ctx) {
-    const results = await runHealthCheck(env);
-    return new Response(JSON.stringify(results, null, 2), {
-      headers: { "Content-Type": "application/json" }
+  async fetch(request, env) {
+    const results = await runHealthChecks(env);
+
+    return Response.json({
+      timestamp: new Date().toISOString(),
+      worker: "Parmar Home Infrastructure Monitor",
+      services: results
     });
   }
 };
 
-async function checkSingleService(service, env) {
-  let isUp = false;
-  let statusCode = 0;
-  let responseTime = 0;
+/**
+ * ----------------------------------------------------------
+ * Main Health Check Runner
+ * ----------------------------------------------------------
+ */
 
-  const startTime = Date.now();
-  try {
-    // Lower timeout to 4 seconds to prevent Worker socket choking
-    const response = await fetch(service.url, {
-      method: "GET",
-      headers: { "User-Agent": "Cloudflare-Heartbeat-Worker/1.0" },
-      // Change 4000 to 8000 for a more forgiving timeout limit
-      signal: AbortSignal.timeout(8000)
-    });
-    responseTime = Date.now() - startTime;
-    statusCode = response.status;
-    isUp = response.ok || (statusCode >= 300 && statusCode < 400);
-  } catch (err) {
-    responseTime = Date.now() - startTime;
-    isUp = false;
-    statusCode = 504;
+async function runHealthChecks(env) {
+  const results = [];
+
+  for (const service of SERVICES) {
+    const result = await checkService(service, env);
+    results.push(result);
   }
 
-  const kvKey = `STATE_${service.name.replace(/\s+/g, "_")}`;
-  const previousState = (await env.HEARTBEAT_KV?.get(kvKey)) || "UP";
-  const currentStatus = isUp ? "UP" : "DOWN";
+  return results;
+}
 
-  // Trigger alert ONLY on state change
-  if (previousState === "UP" && currentStatus === "DOWN") {
-    const sent = await sendEmailAlert(
+/**
+ * ----------------------------------------------------------
+ * Individual Service Check
+ * ----------------------------------------------------------
+ */
+
+async function checkService(service, env) {
+  const kvKey = createStateKey(service.name);
+
+  const state = await getServiceState(env, kvKey);
+
+  const checkResult = await performRequest(service.url);
+
+  updateCounters(state, checkResult.isUp);
+
+  const transition = detectStateTransition(state);
+
+  if (transition) {
+    await sendStatusNotification(
       env,
-      `🔴 ALERT: ${service.name} is DOWN!`,
-      buildAlertHTML(service.name, service.url, "DOWN", statusCode, responseTime)
+      service,
+      transition,
+      checkResult,
+      state
     );
-    // Only update KV if email was sent successfully or attempt completed
-    if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "DOWN");
-  } else if (previousState === "DOWN" && currentStatus === "UP") {
-    await sendEmailAlert(
-      env,
-      `🟢 RECOVERED: ${service.name} is back ONLINE`,
-      buildAlertHTML(service.name, service.url, "RECOVERED", statusCode, responseTime)
-    );
-    if (env.HEARTBEAT_KV) await env.HEARTBEAT_KV.put(kvKey, "UP");
   }
+
+  await saveServiceState(env, kvKey, state);
 
   return {
     service: service.name,
-    status: currentStatus,
-    statusCode,
-    responseTime: `${responseTime}ms`
+    state: state.state,
+    failures: state.failures,
+    successes: state.successes,
+    statusCode: checkResult.statusCode,
+    responseTime: `${checkResult.responseTime}ms`
   };
 }
 
-async function runHealthCheck(env) {
-  // Run all service checks concurrently using Promise.all
-  return await Promise.all(SERVICES_TO_MONITOR.map(s => checkSingleService(s, env)));
-}
+/**
+ * ----------------------------------------------------------
+ * HTTP Request Handler
+ * ----------------------------------------------------------
+ */
 
-async function sendEmailAlert(env, subject, htmlBody) {
-  const resendApiKey = env.RESEND_API_KEY;
-  if (!resendApiKey) {
-    console.error("RESEND_API_KEY environment variable is missing!");
-    return false;
-  }
+async function performRequest(url) {
+  const started = Date.now();
 
   try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
+    const response = await fetch(url, {
+      method: "GET",
       headers: {
-        "Authorization": `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json"
+        "User-Agent": "Parmar-Monitor/2.0"
       },
-      body: JSON.stringify({
-        from: FROM_EMAIL,
-        to: NOTIFY_EMAIL,
-        subject: subject,
-        html: htmlBody
-      })
+      signal: AbortSignal.timeout(
+        CONFIG.requestTimeoutMs
+      )
     });
 
-    if (!res.ok) {
-      console.error("Resend API error:", await res.text());
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.error("Failed to send email via Resend:", err);
-    return false;
+    return {
+      isUp:
+        response.ok ||
+        (
+          response.status >= 300 &&
+          response.status < 400
+        ),
+      statusCode: response.status,
+      responseTime: Date.now() - started,
+      error: null
+    };
+  } catch (error) {
+    return {
+      isUp: false,
+      statusCode: 0,
+      responseTime: Date.now() - started,
+      error: error.message
+    };
   }
 }
 
-function buildAlertHTML(serviceName, url, status, statusCode, responseTime) {
-  const color = status === "DOWN" ? "#e53e3e" : "#38a169";
-  const statusLabel = status === "DOWN" ? "CRITICAL OUTAGE DETECTED" : "SERVICE RECOVERED";
+/**
+ * ----------------------------------------------------------
+ * KV State Management
+ * ----------------------------------------------------------
+ */
+
+async function getServiceState(env, key) {
+  const stored =
+    await env.HEARTBEAT_KV.get(key);
+
+  if (stored) {
+    return JSON.parse(stored);
+  }
+
+  return {
+    state: "UP",
+    failures: 0,
+    successes: 0,
+    lastChange:
+      new Date().toISOString()
+  };
+}
+
+async function saveServiceState(env, key, state) {
+  await env.HEARTBEAT_KV.put(
+    key,
+    JSON.stringify(state)
+  );
+}
+
+function createStateKey(serviceName) {
+  return `STATE_${serviceName.replace(
+    /\W/g,
+    "_"
+  )}`;
+}
+
+/**
+ * ----------------------------------------------------------
+ * Status Logic
+ * ----------------------------------------------------------
+ */
+
+function updateCounters(state, isUp) {
+  if (isUp) {
+    state.successes++;
+    state.failures = 0;
+  } else {
+    state.failures++;
+    state.successes = 0;
+  }
+}
+
+function detectStateTransition(state) {
+  if (
+    state.state === "UP" &&
+    state.failures >=
+      CONFIG.failureThreshold
+  ) {
+    state.state = "DOWN";
+    state.lastChange =
+      new Date().toISOString();
+
+    return "DOWN";
+  }
+
+  if (
+    state.state === "DOWN" &&
+    state.successes >=
+      CONFIG.successThreshold
+  ) {
+    state.state = "UP";
+    state.lastChange =
+      new Date().toISOString();
+
+    return "RECOVERED";
+  }
+
+  return null;
+}
+
+/**
+ * ----------------------------------------------------------
+ * Notifications
+ * ----------------------------------------------------------
+ */
+
+async function sendStatusNotification(
+  env,
+  service,
+  transition,
+  result,
+  state
+) {
+  const subject =
+    transition === "DOWN"
+      ? `🔴 ALERT: ${service.name} is DOWN`
+      : `🟢 RECOVERED: ${service.name} is ONLINE`;
+
+  const html = buildEmailTemplate({
+    service,
+    transition,
+    result,
+    state
+  });
+
+  await sendEmail(
+    env,
+    subject,
+    html
+  );
+}
+
+async function sendEmail(
+  env,
+  subject,
+  html
+) {
+  try {
+    const response = await fetch(
+      "https://api.resend.com/emails",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
+          "Content-Type":
+            "application/json"
+        },
+        body: JSON.stringify({
+          from: CONFIG.fromEmail,
+          to: CONFIG.notifyEmail,
+          subject,
+          html
+        })
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        await response.text()
+      );
+    }
+  } catch (error) {
+    console.error(
+      "Resend Error:",
+      error
+    );
+  }
+}
+
+/**
+ * ----------------------------------------------------------
+ * Email Template
+ * ----------------------------------------------------------
+ */
+
+function buildEmailTemplate(data) {
+  const isDown =
+    data.transition === "DOWN";
+
+  const color = isDown
+    ? "#dc2626"
+    : "#16a34a";
+
+  const icon = isDown
+    ? "🔴"
+    : "🟢";
+
+  const title = isDown
+    ? "Service Outage Detected"
+    : "Service Restored";
 
   return `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px;">
-      <h2 style="color: ${color}; margin-top: 0;">${statusLabel}</h2>
-      <p>Cloudflare Heartbeat Worker detected a status change on your home server.</p>
-      <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
-        <tr><td style="padding: 8px; font-weight: bold;">Service:</td><td style="padding: 8px;">${serviceName}</td></tr>
-        <tr><td style="padding: 8px; font-weight: bold;">URL:</td><td style="padding: 8px;"><a href="${url}">${url}</a></td></tr>
-        <tr><td style="padding: 8px; font-weight: bold;">HTTP Status:</td><td style="padding: 8px;">${statusCode}</td></tr>
-        <tr><td style="padding: 8px; font-weight: bold;">Response Time:</td><td style="padding: 8px;">${responseTime}ms</td></tr>
-        <tr><td style="padding: 8px; font-weight: bold;">Timestamp:</td><td style="padding: 8px;">${new Date().toISOString()}</td></tr>
-      </table>
-    </div>
-  `;
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+</head>
+
+<body style="margin:0;background:#0f172a;font-family:Segoe UI,Arial,sans-serif;">
+
+<div style="max-width:720px;margin:40px auto;background:#111827;border-radius:16px;overflow:hidden;color:#ffffff;">
+
+<div style="background:${color};padding:24px;">
+<h1 style="margin:0;">
+${icon} ${title}
+</h1>
+
+<p style="margin-top:10px;">
+Parmar Home Infrastructure Monitor
+</p>
+</div>
+
+<div style="padding:30px;">
+
+<table width="100%" cellpadding="8">
+
+<tr>
+<td><strong>Service</strong></td>
+<td>${data.service.name}</td>
+</tr>
+
+<tr>
+<td><strong>Status</strong></td>
+<td>${data.transition}</td>
+</tr>
+
+<tr>
+<td><strong>URL</strong></td>
+<td>${data.service.url}</td>
+</tr>
+
+<tr>
+<td><strong>HTTP Status</strong></td>
+<td>${data.result.statusCode}</td>
+</tr>
+
+<tr>
+<td><strong>Response Time</strong></td>
+<td>${data.result.responseTime} ms</td>
+</tr>
+
+<tr>
+<td><strong>Timestamp</strong></td>
+<td>${new Date().toLocaleString("en-IN")}</td>
+</tr>
+
+</table>
+
+</div>
+
+<div style="background:#0b1220;padding:20px;text-align:center;color:#94a3b8;font-size:12px;">
+Docker Desktop • Cloudflare Workers • KV • Resend • Traefik
+</div>
+
+</div>
+
+</body>
+</html>
+`;
 }
