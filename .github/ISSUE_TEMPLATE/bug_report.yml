@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a reproducible monitor defect without sharing secrets
+body:
+  - type: markdown
+    attributes:
+      value: Do not include tokens, real email payloads, private URLs, or KV exports. Use private reporting for security vulnerabilities.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps with mocked or sanitized configuration
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Runtime, version, and sanitized error codes

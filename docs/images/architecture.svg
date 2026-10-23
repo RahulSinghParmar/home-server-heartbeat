@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="570" viewBox="0 0 1200 570" role="img" aria-labelledby="title desc">
+  <title id="title">Home Server Heartbeat architecture</title>
+  <desc id="desc">A single cron writer probes HTTPS services, confirms state transitions in KV, and sends persistent outbox events to Resend. Authenticated status only reads cached state.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#64748b"/></marker></defs>
+  <rect width="1200" height="570" rx="24" fill="#0b1220"/>
+  <g font-family="Arial, sans-serif" fill="#e2e8f0">
+    <text x="48" y="58" font-size="14" letter-spacing="3" fill="#5eead4">HOME LAB / EDGE OBSERVABILITY</text>
+    <text x="48" y="109" font-size="36" font-weight="700">Small monitor. Explicit failure handling.</text>
+    <text x="48" y="143" font-size="17" fill="#94a3b8">Cloudflare Workers · KV · Resend · offline regression tests</text>
+    <g fill="#111e32" stroke="#334155" stroke-width="2">
+      <rect x="48" y="205" width="235" height="126" rx="14"/>
+      <rect x="335" y="205" width="235" height="126" rx="14"/>
+      <rect x="622" y="205" width="235" height="126" rx="14"/>
+      <rect x="909" y="205" width="243" height="126" rx="14"/>
+      <rect x="335" y="410" width="522" height="108" rx="14"/>
+    </g>
+    <g stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" fill="none">
+      <path d="M283 267h48"/><path d="M570 267h48"/><path d="M857 267h48"/>
+      <path d="M740 410v-74"/>
+    </g>
+    <g font-size="21" font-weight="700">
+      <text x="70" y="246">01 / Cron</text><text x="357" y="246">02 / Probes</text>
+      <text x="644" y="246">03 / State + outbox</text><text x="931" y="246">04 / Email</text>
+      <text x="357" y="448">Read-only status API</text>
+    </g>
+    <g font-size="15" fill="#94a3b8">
+      <text x="70" y="279">One scheduled writer</text><text x="70" y="304">Every five minutes</text>
+      <text x="357" y="279">Bounded HTTPS checks</text><text x="357" y="304">Timeouts + payload rules</text>
+      <text x="644" y="279">Confirm DOWN / recovery</text><text x="644" y="304">Persist before first send</text>
+      <text x="931" y="279">Stable retry key + payload</text><text x="931" y="304">Acknowledge on next cron</text>
+      <text x="357" y="480">Bearer token · cached state · freshness · pending alerts</text>
+    </g>
+    <text x="48" y="551" font-size="13" fill="#64748b">Best-effort monitoring. KV is eventually consistent; this is not an exactly-once delivery guarantee.</text>
+  </g>
+</svg>

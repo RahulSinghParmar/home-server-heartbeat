@@ -1,0 +1,7 @@
+# Copy to .dev.vars for LOCAL use only. Never commit real credentials.
+# Leave RESEND_API_KEY unset to avoid sending email during local cron tests.
+MONITOR_TOKEN="replace-with-a-random-token-at-least-32-characters"
+NOTIFY_EMAIL="you@example.com"
+FROM_EMAIL="alerts@example.com"
+# Override ALL services with safe test endpoints before manually running cron.
+# SERVICES_JSON='[{"name":"Example","url":"https://example.com/","check":"http"}]'

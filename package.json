@@ -1,12 +1,25 @@
 {
   "name": "home-server-heartbeat",
-  "version": "1.0.0",
-  "description": "Server Health Check Worker with Resend Email Alerts",
+  "version": "2.1.0",
+  "private": true,
+  "description": "Cloudflare Worker health monitoring with persistent incident state and retryable Resend alerts",
+  "type": "module",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "dev": "wrangler dev --local --test-scheduled",
+    "preview": "node scripts/preview.mjs",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/notification.js && prettier --check .",
+    "format": "prettier --write .",
+    "build": "wrangler deploy --dry-run --outdir dist",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "wrangler": "^3.100.0"
+    "prettier": "3.9.10",
+    "wrangler": "4.152.0"
   }
 }
